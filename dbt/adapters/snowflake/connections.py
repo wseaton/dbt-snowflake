@@ -81,6 +81,7 @@ class SnowflakeCredentials(Credentials):
     token: Optional[str] = None
     oauth_client_id: Optional[str] = None
     oauth_client_secret: Optional[str] = None
+    external_auth_url: Optional[str] = None
     query_tag: Optional[str] = None
     client_session_keep_alive: bool = False
     host: Optional[str] = None
@@ -126,7 +127,7 @@ class SnowflakeCredentials(Credentials):
             "schema",
             "authenticator",
             "oauth_client_id",
-            "query_tag",
+            "external_auth_url" "query_tag",
             "client_session_keep_alive",
             "host",
             "port",
@@ -164,7 +165,11 @@ class SnowflakeCredentials(Credentials):
                 # if we have a client ID/client secret, the token is a refresh
                 # token, not an access token
                 if self.oauth_client_id and self.oauth_client_secret:
-                    token = self._get_access_token()
+                    if self.external_auth_url:
+                        logger.debug("Getting external access token")
+                        token = self._get_external_access_token()
+                    else:
+                        token = self._get_access_token()
                 elif self.oauth_client_id:
                     warn_or_error(
                         AdapterEventWarning(
@@ -186,6 +191,37 @@ class SnowflakeCredentials(Credentials):
         result["reuse_connections"] = self.reuse_connections
         result["private_key"] = self._get_private_key()
         return result
+
+    def _get_external_access_token(self) -> str:
+        """
+        Get the access token from the external auth url via a client_credentials flow.
+        """
+
+        if self.authenticator != "oauth":
+            raise DbtInternalError("Can only get access tokens for oauth")
+
+        if self.oauth_client_id is None or self.oauth_client_secret is None:
+            raise DbtInternalError("Need a client ID and a client secret to get an access token")
+
+        if self.external_auth_url is None:
+            raise DbtInternalError("Need an external auth url to get an access token")
+
+        data = {
+            "grant_type": "client_credentials",
+            "client_id": self.oauth_client_id,
+            "client_secret": self.oauth_client_secret,
+        }
+
+        result = requests.post(self.external_auth_url, data=data)
+        if result.status_code != 200:
+            raise DbtDatabaseError(
+                f"Failed to get access token from external auth url {self.external_auth_url}. "
+                f"Got status code {result.status_code} and response: {result.text}"
+            )
+
+        result_json = result.json()
+
+        return result_json["access_token"]
 
     def _get_access_token(self) -> str:
         if self.authenticator != "oauth":
